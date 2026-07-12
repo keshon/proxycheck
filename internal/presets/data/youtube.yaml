@@ -1,0 +1,20 @@
+name: youtube
+description: Proxy can reach YouTube and fetch video metadata from this exit IP.
+timeout: 15s
+requests:
+  # Probe the oEmbed API, not the watch page. oEmbed returns small, stable JSON
+  # that does NOT vary by User-Agent or consent state, and uses real status
+  # codes (200 = servable, 401/404 = unavailable). Scraping the watch page for
+  # "videoDetails" is unreliable: YouTube serves bots/consent-gated clients a
+  # stripped page without that marker, so the check fails even for good proxies.
+  - url: "https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=jNQXAC9IVRw&format=json"
+    expect:
+      status: [200]
+      body_contains:
+        - '"author_name"'
+  # Media-path throughput: pull a chunk of the image CDN to confirm bytes
+  # actually move through the proxy, not just that the API answers.
+  - url: https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg
+    expect:
+      status: [200]
+      min_download: 8192

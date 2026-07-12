@@ -1,0 +1,16 @@
+name: telegram
+description: Proxy can reach Telegram's Bot API (a primary censorship target).
+timeout: 12s
+requests:
+  # The web frontend (web.telegram.org) isn't what gets blocked — Telegram's API
+  # and MTProto data centers are. api.telegram.org answers an invalid bot token
+  # with a deterministic 401 + JSON error, so a clean 401 carrying the error
+  # marker means the API is reachable through the proxy. A censor typically
+  # yields a timeout/reset or an HTML block page instead.
+  #
+  # Note: this checks the HTTPS Bot API surface. Telegram's core MTProto data
+  # centers use a non-HTTP protocol this tool can't probe directly.
+  - url: "https://api.telegram.org/bot123456:invalid/getMe"
+    expect:
+      status: [401, 404]
+      body_contains: ['"error_code"']

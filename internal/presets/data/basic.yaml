@@ -1,0 +1,10 @@
+name: basic
+description: Proxy is alive and forwards HTTPS to a neutral endpoint.
+timeout: 12s
+requests:
+  # Pure reachability: can the proxy fetch a neutral endpoint at all? No exit-IP
+  # probe here, so this is fast and needs no origin-IP lookup. Use the anonymity
+  # preset when you care about the exit IP and what the proxy leaks.
+  - url: https://api.ipify.org
+    expect:
+      status: [200]

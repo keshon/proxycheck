@@ -1,0 +1,13 @@
+/db.json
+.env
+*.exe
+/dist
+/tools
+*.webm
+*.mp4
+/.VSCodeCounter
+proxies.txt
+/proxies
+*.json
+datastore.json*
+*.txt

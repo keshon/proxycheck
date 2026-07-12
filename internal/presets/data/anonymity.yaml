@@ -1,0 +1,7 @@
+name: anonymity
+description: Captures the proxy's exit IP and classifies anonymity vs your origin IP.
+timeout: 12s
+# The exit-IP probe IS the whole check: it fetches a plain-text IP echo through
+# the proxy, records the exit IP, and (when your origin IP is known) reports
+# transparent / anonymous. No separate request needed.
+exit_ip_probe: https://api.ipify.org
