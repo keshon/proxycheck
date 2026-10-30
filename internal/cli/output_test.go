@@ -46,8 +46,8 @@ func TestHumanPinnedProgress(t *testing.T) {
 func TestComboSeparatesSinkAndDisplay(t *testing.T) {
 	var data, status strings.Builder
 	w := NewCombo(
-		NewTextSink(&data, true),      // okOnly: only passing proxies to the "file"
-		NewBarDisplay(&status, 2),     // progress bar + summary to "stderr"
+		NewTextSink(&data, true),  // okOnly: only passing proxies to the "file"
+		NewBarDisplay(&status, 2), // progress bar + summary to "stderr"
 	)
 	w.Write(check.Result{Proxy: "http://good:80", OK: true, TotalMS: 5})
 	w.Write(check.Result{Proxy: "http://bad:80", OK: false, ErrorClass: check.ErrTimeout})

@@ -19,7 +19,7 @@ func TestParseProxy(t *testing.T) {
 		{in: "socks5://u:p@1.2.3.4:1080", wantScheme: SOCKS5, wantAddr: "1.2.3.4:1080", wantUser: "u", wantPass: "p"},
 		{in: "[2001:db8::1]:1080", wantScheme: HTTP, wantAddr: "[2001:db8::1]:1080"},
 		{in: "", wantErr: true},
-		{in: "1.2.3.4", wantErr: true},        // no port
+		{in: "1.2.3.4", wantErr: true},          // no port
 		{in: "ftp://1.2.3.4:21", wantErr: true}, // unknown scheme
 	}
 	for _, c := range cases {
@@ -61,15 +61,14 @@ func TestExpectStatusOK(t *testing.T) {
 	}
 }
 
-func TestClassifyAnonymity(t *testing.T) {
-	if got := classifyAnonymity("", ""); got != AnonUnknown {
-		t.Errorf("no data => %q, want unknown", got)
-	}
-	if got := classifyAnonymity("5.6.7.8", "1.2.3.4"); got != AnonAnonymous {
-		t.Errorf("differing IPs => %q, want anonymous", got)
-	}
-	if got := classifyAnonymity("1.2.3.4", "1.2.3.4"); got != AnonTransparent {
-		t.Errorf("same IP => %q, want transparent", got)
+func TestCompareIPs(t *testing.T) {
+	for _, c := range []struct {
+		exit, origin string
+		want         IPComparison
+	}{{"", "", IPUnknown}, {"bad", "192.0.2.1", IPUnknown}, {"198.51.100.1", "192.0.2.1", IPDifferent}, {"::ffff:192.0.2.1", "192.0.2.1", IPSame}} {
+		if got := compareIPs(c.exit, c.origin); got != c.want {
+			t.Errorf("comparison = %q, want %q", got, c.want)
+		}
 	}
 }
 

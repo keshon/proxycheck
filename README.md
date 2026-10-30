@@ -1,212 +1,271 @@
 # proxycheck
 
-A small Go tool that does one thing well: **answer "does this proxy work for this
-target, and how well?"** — with an honest, machine-readable result.
+Check proxies against target-specific YAML presets from a CLI or streaming HTTP
+API. Results include request outcomes, timings and failure classes.
 
-It is preset-based. "Can YouTube work through this proxy" is not a special mode
-baked into the engine; it's just one *check preset* — a declarative YAML spec.
-`basic`, `anonymity`, `youtube`, and `telegram` ship built in, and you add your
-own by dropping a YAML file in a directory. The core engine knows nothing about
-any specific target.
+Built-in presets cover a basic HTTPS request, exit-IP comparison, YouTube
+metadata and image delivery, and Telegram Bot API access. Custom presets use the
+same engine.
 
-## Why it's shaped this way
+Passing a check means its configured HTTP assertions passed. It does not
+establish that a proxy is anonymous or suitable for every request. TLS peers
+are verified using the system trust store. See [scope](#scope) and
+[production deployment](docs/production.md).
 
-The valuable output isn't `alive: true/false`. It's the **error class**:
+## Build and run
 
-| ok | error_class | meaning |
-|----|-------------|---------|
-| ✓  | —           | works for this target |
-| ✗  | `timeout`   | proxy unreachable / too slow |
-| ✗  | `refused`   | nothing listening |
-| ✗  | `dns`       | host didn't resolve |
-| ✗  | `tls`       | TLS handshake failed |
-| ✗  | `protocol`  | not a valid proxy / auth rejected |
-| ✗  | `target_block` | proxy is **alive** but the target rejected its exit IP (403/451/geo-block/missing marker) |
-| ✗  | `assertion` | reached the target, but the response wasn't what the preset requires |
-
-"Dead proxy" vs "live proxy that YouTube blocks" are different facts. Collapsing
-them into a boolean is exactly what makes generic proxy checkers useless for
-targeted work.
-
-## Install / build
+The module requires Go 1.26.10 or later. Keep the build toolchain patched;
+updating source alone does not patch an existing binary.
 
 ```sh
+git clone https://github.com/keshon/proxycheck.git
+cd proxycheck
 go build -o proxycheck ./cmd/proxycheck
+./proxycheck presets
+./proxycheck run -p basic proxies.txt
 ```
 
-## Use — three surfaces, one engine
+On Windows, build with `go build -o proxycheck.exe ./cmd/proxycheck` and run
+`.\proxycheck.exe presets`. Subsequent examples use `proxycheck` as the executable
+name; use `./proxycheck` on Unix or `.\proxycheck.exe` on Windows unless the
+binary is on PATH.
 
-**CLI (interactive):** on a terminal you get a colored table with a live counter.
+Create `proxies.txt` with one proxy per line. The addresses below are reserved
+documentation examples, not working proxies:
+
+```text
+192.0.2.10:8080
+socks5://198.51.100.20:1080
+http://user:password@192.0.2.30:3128
+```
+
+## Inputs
+
+Supply files, directories, or `-` for stdin. With no paths, input is read from
+stdin. Directory traversal is recursive. Blank lines and comment lines beginning
+with `#` are skipped; the first whitespace-delimited token on each other line
+is parsed as a proxy. Canonically identical proxy URLs are deduplicated.
+
+Accepted forms:
+
+```text
+host:port
+scheme://host:port
+scheme://user:password@host:port
+user:password@host:port
+[2001:db8::1]:8080
+```
+
+Schemes are `http`, `https`, `socks4` and `socks5`. Bare addresses default to
+`http`; the SOCKS4 implementation uses SOCKS4a for hostnames. IPv6 literals must
+be bracketed. Proxy passwords are masked in result output.
+SOCKS4 supports USERID only; password authentication is rejected rather than ignored.
+
+## CLI
+
+Put flags before positional input paths. Run `proxycheck run -h` for help.
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `-p`, `-preset` | `basic` | Preset name |
+| `-c` | `100` | Worker concurrency, from 1 to 256 |
+| `-timeout` | `8s` | Dial timeout, not total duration of the preset |
+| `-f`, `-format` | `text` | Data format: `text` or `json` |
+| `-json` | false | Shorthand for JSON output |
+| `-progress` | `auto` | Live display: `auto`, `list`, `bar`, `none` |
+| `-ok-only` | false | Keep only passing results in data output |
+| `-presets-dir` | User config directory | Custom YAML preset directory |
+| `-include-credentials` | false | Include original passwords in output; sensitive opt-in |
+
 ```sh
+# Target-specific checks
 proxycheck run -p youtube proxies.txt
-```
 
-**CLI (saving / piping):** two independent knobs — the **data** format written
-to stdout, and the **progress** display drawn on stderr.
-```sh
-proxycheck run -p youtube ./proxies > working.txt              # text data + progress bar
-proxycheck run -p youtube -progress list ./proxies > working.txt   # watch results scroll
-proxycheck run -p basic -json proxies.txt | jq -r 'select(.ok).proxy'
-```
-
-Paths may be files *or* directories (directories are walked recursively).
-
-### Output: data format (`-f`, `--format`) vs. progress (`--progress`)
-
-These are separate concerns, which is what lets you save a clean file *and*
-watch progress at the same time without the two fighting over one stream.
-
-**Data → stdout** (`-f text|json`, default `text`; `-json` is shorthand):
-
-| format | what it is |
-|--------|-----------|
-| `text` *(default)* | `address # info` per line — **round-trips** as input |
-| `json` | one JSON object per line (NDJSON) |
-
-```
-socks5://68.71.243.14:4145 # ok connect=1969ms ttfb=2456ms total=2456ms exit=5.6.7.8 anonymous
-http://183.109.79.187:80 # fail protocol: unexpected EOF
-```
-The proxy is the first token, so a saved `text` file feeds straight back in.
-
-**Progress → stderr** (`--progress list|bar|none`, default `auto`):
-
-| mode | what it shows |
-|------|---------------|
-| `list` | one decorated result line as each completes (like the table) |
-| `bar`  | a single self-updating progress bar |
-| `none` | nothing live — just the final summary |
-| `auto` *(default)* | `bar` when you're saving stdout to a file, else `none` |
-
-The run summary always goes to stderr, so a redirected stdout stays a clean data
-file. On a terminal with no `-format`/`-progress` override you simply get the
-interactive table. Add `--ok-only` to keep only passing proxies in the file (the
-live view still shows everything).
-
-**HTTP API (inside a bigger system):** streams NDJSON as each proxy finishes.
-```sh
-proxycheck serve -addr :8080
-```
-```sh
-curl -sN localhost:8080/v1/check \
-  -d '{"preset":"youtube","proxies":["1.2.3.4:8080","socks5://5.6.7.8:1080"]}'
-# GET /v1/presets lists available checks
-```
-
-The API is deliberately thin: no job queue, no database, no scheduler. The
-caller owns persistence and scheduling — this endpoint just checks and streams.
-
-## Recipes
-
-```sh
-# Quick reachability sweep of one file, on your terminal (interactive table)
-proxycheck run -p basic proxies.txt
-
-# Find proxies that reach YouTube, save the working ones to a file, watch a bar
+# Save passing proxies; progress goes to stderr
 proxycheck run -p youtube --ok-only ./proxies > youtube-ok.txt
 
-# Watch each result scroll by while still saving a clean file
-proxycheck run -p telegram -progress list ./proxies > telegram.txt
+# Emit NDJSON for a pipeline
+proxycheck run -p basic -json proxies.txt | jq -r 'select(.ok).proxy'
 
-# See exit IPs and anonymity for a list, as JSON, pull the elite/anonymous ones
-proxycheck run -p anonymity -json proxies.txt | jq -r 'select(.anonymity=="anonymous").proxy'
+# Request a scrolling progress display while saving data
+proxycheck run -p telegram -progress list ./proxies > results.txt
 
-# Fast, aggressive sweep: 500 workers, 3s dial timeout
-proxycheck run -p basic -c 500 -timeout 3s ./proxies > alive.txt
-
-# Read every file under a directory (recursive), dedup, check
-proxycheck run -p basic ./proxies
-
-# Round-trip: text output feeds straight back in as input
-proxycheck run -p basic --ok-only proxies.txt > alive.txt
-proxycheck run -p youtube alive.txt > youtube-ok.txt
-
-# Pipe a list in on stdin
-cat *.txt | proxycheck run -p basic -json | jq -r 'select(.ok).proxy'
-
-# Use your own presets directory (overrides built-ins by name)
-proxycheck run -p my-service -presets-dir ./my-presets proxies.txt
-
-# Silent data-only run for a script (nothing live, summary to stderr)
-proxycheck run -p basic -progress none proxies.txt > out.txt 2>/dev/null
+# Read from stdin, with no live display
+cat proxies.txt | proxycheck run -p basic -progress none -json
 ```
+
+### Output and progress
+
+With stdout attached to a terminal and no explicit format/progress flags, the
+CLI prints its interactive result table, counter and summary to stdout.
+Otherwise, data goes to stdout and progress/summary go to stderr.
+
+- `text`: one `proxy-url # result details` line per result.
+- `json`: one JSON object per line (NDJSON), not a single JSON array.
+- `-progress list`: print results as they finish.
+- `-progress bar`: draw an updating counter/bar.
+- `-progress none`: suppress live progress; retain the summary.
+- `auto`: use a bar when stdout is redirected and stderr is a terminal;
+  otherwise no live display.
+
+Results arrive in completion order. `-ok-only` filters saved data; a separate
+live display still counts all checks. A failed proxy check is a result, not by
+itself a nonzero CLI exit. Invocation/setup errors, cancellation, and failed
+output writes/flushes exit nonzero and stop remaining work.
+
+Annotated text output can be reused as input **for proxies without passwords**:
+
+```sh
+proxycheck run -p basic --ok-only proxies.txt > basic-ok.txt
+proxycheck run -p youtube basic-ok.txt > youtube-results.txt
+```
+
+Authenticated output contains `***` instead of the original password. The parser
+rejects those masked lines instead of silently using the wrong credential. JSON
+output also redacts passwords. Keep original input, or explicitly opt into a
+credential-preserving export:
+
+```sh
+# POSIX example: create output readable only by its owner
+umask 077
+proxycheck run -p basic --ok-only -include-credentials proxies.txt > private-results.txt
+```
+
+That output contains plaintext passwords. Keep it private; the HTTP API never
+includes passwords. On Windows, use a destination protected by appropriate ACLs.
+
+### Result fields
+
+NDJSON includes `proxy`, `check`, `ok`, `total_ms` and `checked_at`, plus optional
+`error_class`, `error`, `connect_ms`, `ttfb_ms`, `exit_ip`, `ip_comparison` and `steps`.
+Timings are best-effort measurements; zero/missing phase timings do not prove
+that no network activity occurred. The source schema is
+[`pkg/check/result.go`](pkg/check/result.go).
+
+| Failure class | Current interpretation |
+| --- | --- |
+| `timeout` | A network operation or check exceeded its deadline |
+| `refused` | The OS reports an actively refused connection |
+| `dns` | DNS resolution failed |
+| `tls` | A classified TLS failure, including certificate verification failure |
+| `protocol` | Proxy/protocol failure or another unclassified transport error |
+| `target_block` | Rejected status such as 403/429/451, missing required marker, or present block marker |
+| `assertion` | Another expected status/header/download condition failed |
+| `input` | The request/spec could not be constructed |
+
+`target_block` is a response heuristic. It does not prove that the exit IP was
+the cause, or that retrying with another proxy will succeed.
 
 ## Presets
 
-Four built-ins ship in the binary (`proxycheck presets` lists them):
+`proxycheck presets` lists the resolved preset set, including custom overrides.
 
-| preset | question it answers |
-|--------|--------------------|
-| `basic` | Is this a working proxy at all? (reachability only, fast) |
-| `anonymity` | What is the exit IP, and does it hide my origin? |
-| `youtube` | Can it reach YouTube's API + media CDN from this exit IP? |
-| `telegram` | Can it reach Telegram's Bot API (a censorship target)? |
+| Preset | Configured check |
+| --- | --- |
+| `basic` | Fetch `https://api.ipify.org` and require HTTP 200 |
+| `anonymity` | Fetch an exit-IP echo and compare it with a directly detected origin IP |
+| `youtube` | Fetch YouTube oEmbed metadata and at least 8192 bytes from its image CDN |
+| `telegram` | Request Telegram's Bot API endpoint with configured assertions |
 
-A preset is just a spec like:
+The YouTube preset does not verify video playback. Exit-IP comparison does not
+inspect forwarded-origin headers or establish anonymity. `ip_comparison` is
+`same`, `different`, or `unknown` relative to a validated direct origin-IP
+observation. Legacy `anonymity` labels are no longer emitted.
+
+Custom presets are `*.yaml` files in the directory selected by `-presets-dir`,
+then `PROXYCHECK_PRESETS`, then Go's `os.UserConfigDir()` plus `proxycheck/presets`:
+
+- Linux: `$XDG_CONFIG_HOME/proxycheck/presets`, or `~/.config/proxycheck/presets`.
+- macOS: `~/Library/Application Support/proxycheck/presets`.
+- Windows: `%AppData%\proxycheck\presets`.
+
+A custom preset with the same `name` overrides a built-in. Missing directories
+are skipped. YAML supports a duration string and request assertions:
 
 ```yaml
-name: youtube
-description: Proxy can reach YouTube and fetch video metadata from this exit IP.
+name: my-service
+description: Check a response marker from my service.
 timeout: 15s
 requests:
-  # oEmbed is a small, stable JSON API — unlike the watch page it does NOT vary
-  # by User-Agent or consent state, so the marker check is deterministic.
-  - url: "https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=jNQXAC9IVRw&format=json"
+  - url: https://example.com/health
     expect:
       status: [200]
-      body_contains: ['"author_name"']
-  - url: https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg
-    expect:
-      min_download: 8192                   # throughput probe: actually moves bytes
+      body_contains: ["ready"]
 ```
 
-Assertions available per request: `status`, `body_contains`, `body_absent`,
-`header`, `min_download`. A spec may also set `exit_ip_probe` (a plain-text IP
-echo URL) to capture the exit IP and classify anonymity against your origin IP.
+Available assertions: `status`, `body_contains`, `body_absent`, `header`
+(header-name to substring map), and `min_download` (bytes). Requests default to
+GET. Redirects are not followed. An empty status list accepts any 2xx response.
+An optional `exit_ip_probe` names a plain-text IP echo URL, fetched once and
+validated as an IP address. Specs are limited to 16 requests, a 60-second total
+check timeout, and at most 1 MiB of `min_download`. YAML rejects unknown fields
+and multiple documents. Custom presets are trusted operator configuration.
 
-> **On checking "does YouTube work":** the requests run with a browser
-> User-Agent, and the check verifies youtube.com is reachable and serving video
-> metadata from the proxy's exit IP, plus that the image CDN moves bytes. It does
-> **not** prove video *playback* — that goes through `googlevideo.com` with
-> signed URLs and the player pipeline, which no single HTTP GET can validate.
-> Don't scrape the watch page for markers like `"videoDetails"`: YouTube serves
-> bot/consent-gated clients a stripped page without them, so the check fails even
-> for working proxies.
+Responses are scanned up to 256 KiB, or a larger configured `min_download` up
+to 1 MiB. Interrupted reads fail. Body-marker assertions require a complete
+response within that scan limit; minimum-download-only checks may intentionally
+sample a bounded prefix of a larger response.
 
-Add your own presets in `$XDG_CONFIG/proxycheck/presets/*.yaml` (or point at any
-directory with `-presets-dir`, or set `PROXYCHECK_PRESETS`). A user preset with
-the same `name:` overrides the built-in.
+## HTTP API
 
-## Supported proxy inputs
+Use the API with trusted clients on a private interface:
 
-Pass any mix of **files and directories** (directories are read recursively), or
-pipe a list on stdin. Each line is one proxy in any of these shapes:
-
-`host:port`, `scheme://host:port`, `scheme://user:pass@host:port`, and
-`user:pass@host:port`. Schemes: `http`, `https`, `socks4` (SOCKS4a), `socks5`.
-Bare `host:port` defaults to `http`. Lines may carry trailing annotations
-(`ip:port # 2.5s`) — the first token wins, so `text`-format output re-ingests
-cleanly. Duplicates across all sources are removed.
-
-## Deliberately out of scope
-
-No proxy scraping, no rotation/pool serving, no rescan daemon, no persistence,
-no GUI. Each of those is a separate tool that *consumes* this one's NDJSON.
-
-## Layout
-
-```
-pkg/check/          engine — parse, dial (http/socks4/socks5), spec eval, pool. No target knowledge.
-internal/presets/   embedded YAML specs + user-override loader
-internal/cli/        input reader, table + JSONL writers
-internal/server/     POST /v1/check (NDJSON stream), GET /v1/presets
-internal/commands/   run / serve / presets as command.Command, in a registry
-cmd/proxycheck/      thin main: builds the registry and dispatches by name
+```sh
+proxycheck serve -addr 127.0.0.1:8080
 ```
 
-Subcommands implement the [github.com/keshon/command](https://github.com/keshon/command)
-`Command` interface (`Name`/`Description`/`Run`) and live in a `command.Registry`;
-`main` just dispatches by name and prints usage straight from the registry. Each
-command is wrapped with panic-recovery middleware via `command.Apply`. Flag
-parsing stays inside each command, so the same command types could be driven from
-another transport (Discord, HTTP, a worker) without touching the check engine.
+```sh
+curl -sN http://127.0.0.1:8080/v1/check \
+  -H 'Content-Type: application/json' \
+  -d '{"preset":"youtube","proxies":["192.0.2.10:8080","socks5://198.51.100.20:1080"]}'
+```
+
+- `GET /v1/presets`: JSON array of preset names and descriptions.
+- `POST /v1/check`: stream NDJSON results as valid proxies finish.
+- `GET /healthz`: HTTP 200 health response.
+
+The POST body takes `preset`, `proxies`, optional `concurrency` (default 32,
+maximum 64), and `dial_timeout` such as `"3s"` (maximum 30s). `Content-Type:
+application/json` is required; unknown fields, trailing JSON and any malformed
+proxy reject the whole batch before checking starts. Accepted proxies produce
+one record each, including duplicates, unless the stream is interrupted.
+
+The server binds to `127.0.0.1:8080` by default. Non-loopback listeners require
+`PROXYCHECK_API_TOKEN` with at least 32 characters. When configured, send it in
+`Authorization: Bearer <token>` for all `/v1/*` calls. Use TLS termination before
+transmitting bearer tokens over an untrusted network.
+
+API limits: 1 MiB request bodies, 1000 proxies per batch, four active check
+requests, 64 workers shared across the server, and two minutes per batch. Busy
+admission returns HTTP 429. Malformed input returns 400, oversized input 413,
+and unsupported content type 415. See [production deployment](docs/production.md)
+for network policy and resource bounds.
+
+Proxy destinations must resolve entirely to public addresses, checked and
+pinned at dial time. `-allow-private-proxies` explicitly permits private/loopback
+proxy endpoints for trusted deployments. Inline `spec` requests are disabled;
+`-allow-inline-specs` enables specs whose targets are public IP literals only.
+Use operator-installed YAML presets for named targets. JSON spec timeouts accept
+strings such as `"15s"` and legacy numeric nanoseconds. Browser-origin requests
+are rejected; this is a machine-to-machine API, not a browser checking service.
+
+## Scope
+
+- Results describe the configured HTTP requests and assertions, not every
+  target, protocol, media player or application flow.
+- Exit-IP comparison does not detect forwarded-origin headers or prove anonymity.
+- `target_block` is a response heuristic, not proof that a specific exit IP
+  caused the rejection.
+- Default output masks passwords; use the original input or explicit credential
+  export when credentials must be reused.
+- A canceled or disconnected stream may end before every result is delivered.
+- Public API deployments need TLS termination, rate limits and network egress
+  policy appropriate to their environment, in addition to built-in controls.
+
+The tool does not scrape proxies, serve a rotating pool, schedule rescans, or
+provide a checking GUI.
+
+## Development
+
+[Package layout and checks](docs/development.md) ·
+[Landing page source](site/index.html) · [MIT license](LICENSE)

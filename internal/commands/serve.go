@@ -21,10 +21,16 @@ func (*serveCmd) Description() string { return "run the HTTP check API" }
 func (*serveCmd) Run(ctx context.Context, inv *command.Invocation) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	var (
-		addr       = fs.String("addr", ":8080", "listen address")
-		presetsDir = fs.String("presets-dir", presetDirDefault(), "user presets directory")
+		addr         = fs.String("addr", "127.0.0.1:8080", "listen address; public listeners require PROXYCHECK_API_TOKEN")
+		presetsDir   = fs.String("presets-dir", presetDirDefault(), "user presets directory")
+		allowPrivate = fs.Bool("allow-private-proxies", false, "allow private/loopback proxy destinations (trusted networks only)")
+		allowInline  = fs.Bool("allow-inline-specs", false, "allow inline specs with public IP literal targets")
 	)
 	if err := fs.Parse(inv.Args); err != nil {
+		return err
+	}
+	token := os.Getenv("PROXYCHECK_API_TOKEN")
+	if err := server.ValidateListenAddress(*addr, token); err != nil {
 		return err
 	}
 	set, err := presets.Load(existingDir(*presetsDir))
@@ -33,7 +39,7 @@ func (*serveCmd) Run(ctx context.Context, inv *command.Invocation) error {
 	}
 	localIP := cli.DetectLocalIP(ctx)
 
-	srv := server.New(set, localIP)
+	srv := server.New(set, localIP, server.Config{Token: token, AllowPrivateProxies: *allowPrivate, AllowInlineSpecs: *allowInline})
 	fmt.Fprintf(os.Stderr, "proxycheck serving on %s (presets: %v)\n", *addr, set.Names())
 	if err := server.ListenAndServe(ctx, *addr, srv.Handler()); err != nil {
 		if ctx.Err() != nil {

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -15,6 +16,7 @@ import (
 type Writer interface {
 	Write(check.Result)
 	Summary()
+	Err() error
 }
 
 // Output is split into two independent concerns:
@@ -45,9 +47,20 @@ func (c *combo) Write(r check.Result) {
 }
 
 func (c *combo) Summary() {
-	c.sink.Summary()  // flush data
+	c.sink.Summary()    // flush data
 	c.display.Summary() // print run summary to stderr
 }
+
+func (c *combo) Err() error    { return errors.Join(c.sink.Err(), c.display.Err()) }
+func (t *textSink) Err() error { t.mu.Lock(); defer t.mu.Unlock(); return t.w.Flush() }
+func (j *jsonSink) Err() error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return errors.Join(j.err, j.w.Flush())
+}
+func (h *humanWriter) Err() error { h.mu.Lock(); defer h.mu.Unlock(); return h.w.Flush() }
+func (n *noneDisplay) Err() error { n.mu.Lock(); defer n.mu.Unlock(); return n.err }
+func (b *barDisplay) Err() error  { b.mu.Lock(); defer b.mu.Unlock(); return b.err }
 
 // --- data sinks (stdout) ---
 
@@ -86,6 +99,7 @@ type jsonSink struct {
 	mu     sync.Mutex
 	w      *bufio.Writer
 	okOnly bool
+	err    error
 }
 
 // NewJSONSink writes NDJSON to w.
@@ -99,6 +113,9 @@ func (j *jsonSink) Write(r check.Result) {
 	}
 	b, err := r.JSON()
 	if err != nil {
+		j.mu.Lock()
+		j.err = errors.Join(j.err, err)
+		j.mu.Unlock()
 		return
 	}
 	j.mu.Lock()
@@ -122,6 +139,7 @@ type noneDisplay struct {
 	status io.Writer
 	total  int
 	ok     int
+	err    error
 }
 
 // NewNoneDisplay counts results silently and prints a summary at the end.
@@ -141,7 +159,7 @@ func (n *noneDisplay) Write(r check.Result) {
 func (n *noneDisplay) Summary() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	summarize(n.status, n.total, n.ok)
+	n.err = errors.Join(n.err, summarize(n.status, n.total, n.ok))
 }
 
 // barDisplay shows a single self-overwriting progress bar.
@@ -152,6 +170,7 @@ type barDisplay struct {
 	done     int
 	ok       int
 	live     bool
+	err      error
 }
 
 // NewBarDisplay renders a progress bar to status. expected is the total count.
@@ -176,7 +195,8 @@ func (b *barDisplay) draw() {
 		filled = b.done * width / b.expected
 	}
 	bar := strings.Repeat("#", filled) + strings.Repeat("-", width-filled)
-	fmt.Fprintf(b.status, "\r[%s] %d/%d  ok=%d\033[K", bar, b.done, b.expected, b.ok)
+	_, err := fmt.Fprintf(b.status, "\r[%s] %d/%d  ok=%d\033[K", bar, b.done, b.expected, b.ok)
+	b.err = errors.Join(b.err, err)
 	b.live = true
 }
 
@@ -184,9 +204,10 @@ func (b *barDisplay) Summary() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.live {
-		fmt.Fprint(b.status, "\r\033[K")
+		_, err := fmt.Fprint(b.status, "\r\033[K")
+		b.err = errors.Join(b.err, err)
 	}
-	summarize(b.status, b.done, b.ok)
+	b.err = errors.Join(b.err, summarize(b.status, b.done, b.ok))
 }
 
 // textLine renders "proxy # comment" for one result.
@@ -197,8 +218,8 @@ func textLine(r check.Result) string {
 		if r.ExitIP != "" {
 			s += " exit=" + r.ExitIP
 		}
-		if r.Anonymity != "" {
-			s += " " + string(r.Anonymity)
+		if r.IPComparison != "" {
+			s += " ip_comparison=" + string(r.IPComparison)
 		}
 		return s
 	}
@@ -207,11 +228,12 @@ func textLine(r check.Result) string {
 }
 
 // summarize writes a one-line run summary to status, if non-nil.
-func summarize(status io.Writer, total, ok int) {
+func summarize(status io.Writer, total, ok int) error {
 	if status == nil {
-		return
+		return nil
 	}
-	fmt.Fprintf(status, "done: %d checked, %d ok, %d failed\n", total, ok, total-ok)
+	_, err := fmt.Fprintf(status, "done: %d checked, %d ok, %d failed\n", total, ok, total-ok)
+	return err
 }
 
 // humanWriter prints a scrolling line per result with a single progress line
@@ -291,8 +313,8 @@ func (h *humanWriter) format(r check.Result) string {
 		if r.ExitIP != "" {
 			detail += "  exit=" + r.ExitIP
 		}
-		if r.Anonymity != "" {
-			detail += "  " + string(r.Anonymity)
+		if r.IPComparison != "" {
+			detail += "  ip_comparison=" + string(r.IPComparison)
 		}
 		return head + " " + detail
 	}

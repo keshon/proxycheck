@@ -3,10 +3,13 @@ package check
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"runtime"
+	"syscall"
 	"time"
 
 	xproxy "golang.org/x/net/proxy"
@@ -19,29 +22,34 @@ var zeroTime time.Time
 // otherwise leak state between checks and skew timings.
 //
 // dialTimeout bounds the TCP/handshake to the proxy itself.
-func transportFor(p Proxy, dialTimeout, tlsTimeout time.Duration) (*http.Transport, error) {
+func transportFor(p Proxy, dialTimeout, tlsTimeout time.Duration, publicOnly bool) (*http.Transport, error) {
 	base := &net.Dialer{Timeout: dialTimeout}
+	var forward interface {
+		proxyDialer
+		xproxy.Dialer
+	} = base
+	if publicOnly {
+		forward = &publicDialer{base: base}
+	}
 
 	tr := &http.Transport{
-		TLSHandshakeTimeout: tlsTimeout,
-		DisableKeepAlives:   true, // each check is independent; no pooling across proxies
-		// We are validating sketchy third-party proxies, not asserting the
-		// target's cert chain end-to-end through them. Skip verify so a MITM
-		// proxy still lets us observe reachability; assertions catch bad bodies.
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		TLSHandshakeTimeout:    tlsTimeout,
+		DisableKeepAlives:      true, // each check is independent; no pooling across proxies
+		TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12},
+		MaxResponseHeaderBytes: 64 << 10,
 	}
 
 	switch p.Scheme {
 	case HTTP, HTTPS:
 		tr.Proxy = http.ProxyURL(p.URL())
-		tr.DialContext = base.DialContext
+		tr.DialContext = forward.DialContext
 
 	case SOCKS5:
 		var auth *xproxy.Auth
 		if p.Username != "" || p.Password != "" {
 			auth = &xproxy.Auth{User: p.Username, Password: p.Password}
 		}
-		d, err := xproxy.SOCKS5("tcp", p.Address(), auth, base)
+		d, err := xproxy.SOCKS5("tcp", p.Address(), auth, forward)
 		if err != nil {
 			return nil, fmt.Errorf("socks5 dialer: %w", err)
 		}
@@ -52,7 +60,7 @@ func transportFor(p Proxy, dialTimeout, tlsTimeout time.Duration) (*http.Transpo
 		tr.DialContext = cd.DialContext
 
 	case SOCKS4:
-		d := &socks4Dialer{proxyAddr: p.Address(), username: p.Username, forward: base}
+		d := &socks4Dialer{proxyAddr: p.Address(), username: p.Username, forward: forward}
 		tr.DialContext = d.DialContext
 
 	default:
@@ -69,6 +77,9 @@ func transportFor(p Proxy, dialTimeout, tlsTimeout time.Duration) (*http.Transpo
 func classifyDialError(err error) ErrorClass {
 	if err == nil {
 		return ErrNone
+	}
+	if errors.Is(err, ErrProxyPolicy) {
+		return ErrInput
 	}
 
 	var netErr net.Error
@@ -88,16 +99,17 @@ func classifyDialError(err error) ErrorClass {
 	if errors.As(err, &tlsErr) {
 		return ErrTLS
 	}
-	if _, ok := err.(*tls.CertificateVerificationError); ok {
+	var certificateErr *tls.CertificateVerificationError
+	var unknownAuthority x509.UnknownAuthorityError
+	var hostnameErr x509.HostnameError
+	if errors.As(err, &certificateErr) || errors.As(err, &unknownAuthority) || errors.As(err, &hostnameErr) {
 		return ErrTLS
 	}
 
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		// "connection refused" surfaces as a syscall error inside OpError.
-		if opErr.Err != nil {
-			return ErrRefused
-		}
+	// Winsock uses WSAECONNREFUSED (10061), not Go's synthetic Windows
+	// syscall.ECONNREFUSED value. Match the actual OS cause on both platforms.
+	if errors.Is(err, syscall.ECONNREFUSED) || (runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(10061))) {
+		return ErrRefused
 	}
 
 	// SOCKS/HTTP-proxy protocol errors carry our own or x/net's messages.

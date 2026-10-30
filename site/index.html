@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Check proxies against the targets you care about. A Go CLI and streaming HTTP API with YAML presets and structured results.">
+  <meta name="theme-color" content="#f5f5f0">
+  <title>proxycheck — Reachability, with a reason.</title>
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./script.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header wrap">
+    <a class="brand" href="#" aria-label="proxycheck home"><span class="brand-icon" aria-hidden="true">↗</span>proxycheck<span class="brand-dot">.</span></a>
+    <nav aria-label="Main navigation"><a href="#results">The result</a><a href="#presets">Presets</a><a href="#start">Quick start</a></nav>
+    <a class="source-link" href="https://github.com/keshon/proxycheck">View source <span aria-hidden="true">↗</span></a>
+  </header>
+
+  <main id="main">
+    <section class="hero wrap" aria-labelledby="hero-title">
+      <div class="eyebrow hero-eyebrow"><span class="live-dot" aria-hidden="true"></span> PROXY CHECKING / OPEN SOURCE <span class="hero-index">001 / CONNECTIVITY</span></div>
+      <div class="hero-grid">
+        <div class="hero-copy">
+          <h1 id="hero-title">Reachability,<br>with a <span>reason.</span></h1>
+          <p class="hero-description">Does this proxy work for <em>your</em> target?<br>Check the request. See the outcome. Keep the details.</p>
+          <div class="hero-actions"><a class="button button-blue" href="#start">Start checking <span aria-hidden="true">↗</span></a><a class="text-link" href="#results">Read a result <span aria-hidden="true">↓</span></a></div>
+          <p class="hero-meta">WRITTEN IN GO <span>/</span> CLI + HTTP API <span>/</span> MIT LICENSE</p>
+        </div>
+        <div class="route-card" aria-label="Illustrative diagram: same proxy, different target outcomes">
+          <div class="route-heading"><span>ONE PROXY / TWO TARGETS</span><span aria-hidden="true">↗</span></div>
+          <div class="route-origin"><span class="node-symbol" aria-hidden="true">⌘</span><div><span class="tiny-label">YOUR INPUT</span><strong>proxies.txt</strong></div><span class="route-step">01</span></div>
+          <div class="route-wire" aria-hidden="true"><span>↓</span><code>HTTP / SOCKS</code></div>
+          <div class="route-proxy"><span class="proxy-symbol" aria-hidden="true">⇄</span><div><span class="tiny-label">ONE PROXY</span><code>192.0.2.10:8080</code></div><span class="route-step">02</span></div>
+          <div class="route-branches" aria-hidden="true"><span></span><span></span></div>
+          <div class="route-targets"><div><span class="target-indicator pass" aria-hidden="true">✓</span><strong>Target A</strong><code>assertions passed</code></div><div><span class="target-indicator block" aria-hidden="true">×</span><strong>Target B</strong><code>target_block</code></div></div>
+          <div class="route-caption"><span class="tiny-label">SAME PROXY. DIFFERENT ANSWER.</span><span>Illustrative route</span></div>
+        </div>
+      </div>
+      <div class="hero-bottom"><span>Check a specific target.</span><p>Choose a preset. Get a structured result<br>with timings and a failure class.</p><a href="#results" class="down-link" aria-label="Explore structured results">↓</a></div>
+    </section>
+
+    <section class="results-section" id="results" aria-labelledby="results-title">
+      <div class="wrap">
+        <div class="section-top"><span class="eyebrow">01 / RESULTS</span><span class="tiny-label">STRUCTURED RESULTS</span></div>
+        <div class="results-grid">
+          <div class="results-copy"><h2 id="results-title">Read the<br>result.</h2><p>Get a result for the configured check, with timings, request steps and a failure class when it doesn’t pass.</p><p class="muted">Three sample outcomes. These examples do not run live checks.</p><div class="result-controls" role="group" aria-label="Illustrative result outcome"><button type="button" data-outcome="passed" aria-pressed="true"><span class="status-dot green"></span>Passed <span>01</span></button><button type="button" data-outcome="timeout" aria-pressed="false"><span class="status-dot amber"></span>Timeout <span>02</span></button><button type="button" data-outcome="target_block" aria-pressed="false"><span class="status-dot red"></span>Target block <span>03</span></button></div></div>
+          <div class="result-specimen">
+            <div class="specimen-bar"><span><span class="code-dot"></span> RESULT / NDJSON</span><span>EXAMPLE DATA</span></div>
+            <div class="specimen-command"><span aria-hidden="true">$</span><code id="sample-command">proxycheck run -p youtube -json proxies.txt</code></div>
+            <pre class="json-output" tabindex="0" aria-label="Illustrative JSON result"><code id="result-json">{
+  "proxy": "http://192.0.2.10:8080",
+  "check": "youtube",
+  "ok": true,
+  "total_ms": 284,
+  "checked_at": "2026-10-30T12:00:00Z"
+}</code></pre>
+            <div class="specimen-verdict"><span id="result-verdict">✓ Assertions passed</span><span id="result-time">284 ms</span></div>
+            <p class="specimen-note" id="result-explanation">The metadata request and image download met the configured checks.</p>
+          </div>
+        </div>
+        <div class="results-footnote"><span aria-hidden="true">↳</span><p><code>target_block</code> indicates a rejected status or an unexpected response marker. See the response and failed assertion in the result.</p><a href="https://github.com/keshon/proxycheck/blob/main/pkg/check/result.go">Result schema ↗</a></div>
+      </div>
+    </section>
+
+    <section class="presets-section wrap" id="presets" aria-labelledby="presets-title">
+      <div class="section-top"><span class="eyebrow">02 / PRESETS</span><span class="tiny-label">FOUR BUILT-INS. YOUR OWN RULES.</span></div>
+      <div class="section-heading"><h2 id="presets-title">Choose what<br>to check.</h2><p>Choose a preset or write a YAML spec.<br>The engine runs the requests and evaluates<br>the assertions you define.</p></div>
+      <div class="preset-list" role="group" aria-label="Choose an example preset">
+        <button class="preset-row" type="button" data-preset="basic" aria-pressed="false"><span class="preset-number">01</span><strong>basic</strong><span class="preset-description">An HTTPS request to an IP echo endpoint.</span><span class="preset-type">REACHABILITY</span><span class="preset-arrow" aria-hidden="true">↗</span></button>
+        <button class="preset-row" type="button" data-preset="anonymity" aria-pressed="false"><span class="preset-number">02</span><strong>anonymity</strong><span class="preset-description">Compare the exit IP with your origin IP.</span><span class="preset-type">IP COMPARISON</span><span class="preset-arrow" aria-hidden="true">↗</span></button>
+        <button class="preset-row active" type="button" data-preset="youtube" aria-pressed="true"><span class="preset-number">03</span><strong>youtube</strong><span class="preset-description">oEmbed metadata and image CDN delivery.</span><span class="preset-type">TARGET CHECK</span><span class="preset-arrow" aria-hidden="true">↗</span></button>
+        <button class="preset-row" type="button" data-preset="telegram" aria-pressed="false"><span class="preset-number">04</span><strong>telegram</strong><span class="preset-description">Bot API reachability with response assertions.</span><span class="preset-type">TARGET CHECK</span><span class="preset-arrow" aria-hidden="true">↗</span></button>
+      </div>
+      <div class="preset-selection"><div><span class="tiny-label">SELECTED EXAMPLE</span><code id="preset-command">proxycheck run -p youtube proxies.txt</code></div><button class="copy-button" data-copy="preset-command" type="button" aria-label="Copy selected preset command">Copy command <span aria-hidden="true">⧉</span></button></div>
+      <p class="preset-explanation" id="preset-explanation">Checks YouTube metadata and image delivery. It does not verify video playback.</p>
+      <div class="custom-preset"><span class="custom-icon" aria-hidden="true">{ }</span><div><h3>Create a custom preset.</h3><p>Status codes, body markers, response headers, minimum bytes.<br>Add a YAML preset; override a built-in by name.</p></div><a class="text-link" href="https://github.com/keshon/proxycheck/blob/main/README.md#presets">Write a preset ↗</a></div>
+    </section>
+
+    <section class="integration-section" aria-labelledby="integration-title"><div class="wrap integration-grid"><div><span class="eyebrow">03 / INTERFACES</span><h2 id="integration-title">CLI and<br>HTTP API.</h2><p>Run it from your terminal. Pipe the results.<br>Or stream them into a system of your own.</p></div><div class="integration-items"><article><span class="integration-number">A / TERMINAL</span><h3>Command-line checks</h3><p>Files, directories or stdin in. Annotated text or NDJSON out. Save passing proxies with <code>--ok-only</code>.</p><code class="inline-command">proxycheck run -p basic -json proxies.txt</code></article><article><span class="integration-number">B / HTTP API</span><h3>Results as they finish.</h3><p><code>POST /v1/check</code> streams NDJSON as checks finish. Your application handles storage and scheduling.</p><code class="inline-command">proxycheck serve -addr 127.0.0.1:8080</code></article></div></div></section>
+
+    <section class="start-section wrap" id="start" aria-labelledby="start-title"><div class="section-top"><span class="eyebrow">04 / GET STARTED</span><span class="tiny-label">NO ACCOUNT. BUILD FROM SOURCE.</span></div><div class="start-grid"><div><h2 id="start-title">Build it.<br>Run a check.</h2><p>Build from source, add your proxy list, and choose a preset.</p><a class="text-link" href="https://github.com/keshon/proxycheck/blob/main/README.md">Read the full guide ↗</a></div><div class="install-panel"><div class="install-header"><span class="tiny-label">QUICK START</span><label for="install-platform" class="visually-hidden">Quick start platform</label><select id="install-platform"><option value="unix">Linux / macOS</option><option value="windows">Windows</option></select></div><ol class="install-steps"><li><span>Get the source</span><code>git clone https://github.com/keshon/proxycheck.git</code><code>cd proxycheck</code></li><li><span>Build the binary</span><code id="build-command">go build -o proxycheck ./cmd/proxycheck</code></li><li><span>Add proxies.txt, then run a check</span><code id="run-command">./proxycheck run -p basic proxies.txt</code></li></ol><button class="copy-button install-copy" data-copy="install" type="button">Copy quick start <span aria-hidden="true">⧉</span></button><p class="install-note">Use your own proxy endpoints. Samples on this page use reserved documentation addresses.</p></div></div></section>
+
+  </main>
+
+  <footer class="site-footer wrap"><a class="brand" href="#"><span class="brand-icon" aria-hidden="true">↗</span>proxycheck<span class="brand-dot">.</span></a><span>Written in Go. CLI and HTTP API.</span><div><a href="https://github.com/keshon/proxycheck/blob/main/LICENSE">MIT license</a><a href="https://github.com/keshon/proxycheck">GitHub ↗</a></div></footer>
+  <p class="visually-hidden" id="interaction-status" role="status" aria-live="polite"></p>
+</body>
+</html>

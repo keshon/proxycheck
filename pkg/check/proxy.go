@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -46,6 +47,9 @@ type Proxy struct {
 // practice. IPv6 hosts must be bracketed per RFC 3986 (e.g. [::1]:1080).
 func ParseProxy(raw string) (Proxy, error) {
 	s := strings.TrimSpace(raw)
+	if len(s) > 4096 {
+		return Proxy{}, fmt.Errorf("proxy URL exceeds 4096 bytes")
+	}
 	if s == "" {
 		return Proxy{}, fmt.Errorf("empty proxy string")
 	}
@@ -55,7 +59,7 @@ func ParseProxy(raw string) (Proxy, error) {
 	if i := strings.Index(s, "://"); i >= 0 {
 		got := Scheme(strings.ToLower(s[:i]))
 		if !isKnownScheme(got) {
-			return Proxy{}, fmt.Errorf("unknown scheme %q (want one of %s)", s[:i], schemeList())
+			return Proxy{}, fmt.Errorf("unknown proxy scheme (want one of %s)", schemeList())
 		}
 		scheme = got
 		rest = s[i+3:]
@@ -65,16 +69,20 @@ func ParseProxy(raw string) (Proxy, error) {
 	// IPv6 and percent-encoded credentials) for free.
 	u, err := url.Parse(string(scheme) + "://" + rest)
 	if err != nil {
-		return Proxy{}, fmt.Errorf("malformed proxy %q: %w", raw, err)
+		return Proxy{}, fmt.Errorf("malformed proxy URL")
 	}
 
 	host := u.Hostname()
 	port := u.Port()
 	if host == "" {
-		return Proxy{}, fmt.Errorf("missing host in %q", raw)
+		return Proxy{}, fmt.Errorf("proxy URL has no host")
 	}
 	if port == "" {
-		return Proxy{}, fmt.Errorf("missing port in %q", raw)
+		return Proxy{}, fmt.Errorf("proxy URL has no port")
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return Proxy{}, fmt.Errorf("invalid proxy port, path, query or fragment")
 	}
 
 	p := Proxy{
@@ -86,6 +94,15 @@ func ParseProxy(raw string) (Proxy, error) {
 	}
 	if pw, ok := u.User.Password(); ok {
 		p.Password = pw
+	}
+	if strings.IndexFunc(p.Username+p.Password+host, func(r rune) bool { return r < 32 || r == 127 }) >= 0 {
+		return Proxy{}, fmt.Errorf("proxy contains invalid control characters")
+	}
+	if p.Password == "***" {
+		return Proxy{}, fmt.Errorf("redacted proxy password cannot be reused; use the original input or an explicit credential export")
+	}
+	if p.Scheme == SOCKS4 && p.Password != "" {
+		return Proxy{}, fmt.Errorf("SOCKS4 supports USERID, not password authentication")
 	}
 	return p, nil
 }
@@ -110,14 +127,14 @@ func (p Proxy) String() string {
 	return p.URL().String()
 }
 
-// Redacted is String with the password masked, safe for logs and API output.
+// Redacted masks the password. Usernames remain visible in logs and API output.
 func (p Proxy) Redacted() string {
 	if p.Password == "" {
 		return p.String()
 	}
 	// Build directly rather than through url.URL, whose encoder would escape the
 	// mask characters (*** -> %2A%2A%2A).
-	return fmt.Sprintf("%s://%s:***@%s", p.Scheme, p.Username, p.Address())
+	return fmt.Sprintf("%s://%s:***@%s", p.Scheme, url.User(p.Username).String(), p.Address())
 }
 
 func isKnownScheme(s Scheme) bool {

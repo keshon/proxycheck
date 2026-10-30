@@ -26,14 +26,15 @@ func (*runCmd) Run(ctx context.Context, inv *command.Invocation) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	fs.Usage = func() { runUsage(fs.Output()) }
 	var (
-		presetName = fs.String("preset", "basic", "preset name")
-		conc       = fs.Int("c", 100, "concurrency")
-		timeout    = fs.Duration("timeout", 8*time.Second, "per-proxy dial timeout")
-		format     = fs.String("format", "text", "output format: text|json")
-		jsonShort  = fs.Bool("json", false, "shorthand for -format json")
-		progress   = fs.String("progress", "auto", "terminal display: auto|list|bar|none")
-		okOnly     = fs.Bool("ok-only", false, "only output passing proxies")
-		presetsDir = fs.String("presets-dir", presetDirDefault(), "user presets directory")
+		presetName  = fs.String("preset", "basic", "preset name")
+		conc        = fs.Int("c", 100, "concurrency")
+		timeout     = fs.Duration("timeout", 8*time.Second, "per-proxy dial timeout")
+		format      = fs.String("format", "text", "output format: text|json")
+		jsonShort   = fs.Bool("json", false, "shorthand for -format json")
+		progress    = fs.String("progress", "auto", "terminal display: auto|list|bar|none")
+		okOnly      = fs.Bool("ok-only", false, "only output passing proxies")
+		presetsDir  = fs.String("presets-dir", presetDirDefault(), "user presets directory")
+		credentials = fs.Bool("include-credentials", false, "include original proxy passwords in output (sensitive)")
 	)
 	fs.StringVar(presetName, "p", "basic", "preset name (shorthand)")
 	fs.StringVar(format, "f", "text", "output format (shorthand)")
@@ -41,6 +42,12 @@ func (*runCmd) Run(ctx context.Context, inv *command.Invocation) error {
 		return err
 	}
 	set := setFlags(fs)
+	if *conc < 1 || *conc > check.MaxConcurrency {
+		return fmt.Errorf("concurrency must be between 1 and %d", check.MaxConcurrency)
+	}
+	if *timeout <= 0 || *timeout > 30*time.Second {
+		return fmt.Errorf("dial timeout must be between 0 and 30s")
+	}
 
 	resolvedFormat, err := resolveFormat(*format, *jsonShort)
 	if err != nil {
@@ -71,7 +78,7 @@ func (*runCmd) Run(ctx context.Context, inv *command.Invocation) error {
 		return fmt.Errorf("no valid proxies to check")
 	}
 
-	// Anonymity classification needs our origin IP; only pay for it when useful.
+	// IP comparison needs a direct origin observation only for probe presets.
 	localIP := ""
 	if spec.ExitIPProbe != "" {
 		localIP = cli.DetectLocalIP(ctx)
@@ -80,10 +87,13 @@ func (*runCmd) Run(ctx context.Context, inv *command.Invocation) error {
 	w := buildWriter(resolvedFormat, resolvedProgress, *okOnly, len(proxies),
 		set["progress"], set["format"] || set["f"] || set["json"])
 
-	opts := check.Options{Concurrency: *conc, DialTimeout: *timeout, LocalIP: localIP}
-	check.Run(ctx, proxies, spec, opts, w.Write)
+	opts := check.Options{Concurrency: *conc, DialTimeout: *timeout, LocalIP: localIP, IncludeCredentials: *credentials}
+	err = check.Run(ctx, proxies, spec, opts, func(res check.Result) error { w.Write(res); return w.Err() })
 	w.Summary()
-	return nil
+	if err != nil {
+		return err
+	}
+	return w.Err()
 }
 
 func runUsage(w io.Writer) {
@@ -107,6 +117,7 @@ flags:
                   auto — bar when saving stdout to a file, else none (default)
   -ok-only      only write proxies that passed (the live view still shows all)
   -presets-dir  directory of user *.yaml presets (overrides built-ins by name)
+  -include-credentials  include passwords in output; sensitive, explicit opt-in
 
 On a terminal with no -format/-progress override you get an interactive table.
 `)

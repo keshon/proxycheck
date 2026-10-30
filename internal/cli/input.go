@@ -83,6 +83,9 @@ func expandPaths(paths []string) ([]string, error) {
 			return nil, fmt.Errorf("access %s: %w", p, err)
 		}
 		if !info.IsDir() {
+			if !info.Mode().IsRegular() {
+				return nil, fmt.Errorf("input %s is not a regular file", p)
+			}
 			out = append(out, p)
 			continue
 		}
@@ -92,7 +95,7 @@ func expandPaths(paths []string) ([]string, error) {
 			if err != nil {
 				return err
 			}
-			if !d.IsDir() {
+			if d.Type().IsRegular() {
 				dirFiles = append(dirFiles, path)
 			}
 			return nil

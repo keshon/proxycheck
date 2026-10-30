@@ -12,26 +12,34 @@ import (
 type ErrorClass string
 
 const (
-	ErrNone     ErrorClass = ""            // success
-	ErrDNS      ErrorClass = "dns"         // proxy host or target host did not resolve
-	ErrRefused  ErrorClass = "refused"     // TCP connection actively refused
-	ErrTimeout  ErrorClass = "timeout"     // deadline hit connecting or reading
-	ErrTLS      ErrorClass = "tls"         // TLS handshake failed
-	ErrProtocol ErrorClass = "protocol"    // proxy spoke garbage / auth rejected / SOCKS error
+	ErrNone     ErrorClass = ""             // success
+	ErrDNS      ErrorClass = "dns"          // proxy host or target host did not resolve
+	ErrRefused  ErrorClass = "refused"      // TCP connection actively refused
+	ErrTimeout  ErrorClass = "timeout"      // deadline hit connecting or reading
+	ErrTLS      ErrorClass = "tls"          // TLS handshake failed
+	ErrProtocol ErrorClass = "protocol"     // proxy spoke garbage / auth rejected / SOCKS error
 	ErrBlocked  ErrorClass = "target_block" // proxy is alive but target refused it (403/451/blockpage)
-	ErrAssert   ErrorClass = "assertion"   // reached target, response failed an expectation
-	ErrInput    ErrorClass = "input"       // could not even build the request (bad spec/proxy)
+	ErrAssert   ErrorClass = "assertion"    // reached target, response failed an expectation
+	ErrInput    ErrorClass = "input"        // could not even build the request (bad spec/proxy)
 )
 
-// Anonymity classifies how much the proxy leaks about the origin. Only meaningful
-// when a spec captures the exit IP and headers via an echo endpoint.
+// Anonymity is retained for source compatibility. No anonymity labels are emitted.
+// Deprecated: use IPComparison; an IP echo does not measure header leakage.
 type Anonymity string
 
 const (
 	AnonUnknown     Anonymity = ""            // not probed
-	AnonTransparent Anonymity = "transparent" // exit IP differs but origin IP is forwarded in headers
-	AnonAnonymous   Anonymity = "anonymous"   // origin hidden, but proxy announces itself (Via/X-Forwarded-For present)
-	AnonElite       Anonymity = "elite"       // origin hidden, no proxy-revealing headers
+	AnonTransparent Anonymity = "transparent" // legacy value, no longer emitted
+	AnonAnonymous   Anonymity = "anonymous"   // legacy value, no longer emitted
+	AnonElite       Anonymity = "elite"       // legacy value, never emitted
+)
+
+type IPComparison string
+
+const (
+	IPUnknown   IPComparison = "unknown"
+	IPSame      IPComparison = "same"
+	IPDifferent IPComparison = "different"
 )
 
 // StepResult records the outcome of a single request within a spec.
@@ -62,8 +70,9 @@ type Result struct {
 	TotalMS   int64 `json:"total_ms"`             // wall time for the whole check
 
 	// Observed facts about the exit path.
-	ExitIP    string    `json:"exit_ip,omitempty"`
-	Anonymity Anonymity `json:"anonymity,omitempty"`
+	ExitIP       string       `json:"exit_ip,omitempty"`
+	Anonymity    Anonymity    `json:"anonymity,omitempty"`
+	IPComparison IPComparison `json:"ip_comparison,omitempty"`
 
 	Steps []StepResult `json:"steps,omitempty"`
 

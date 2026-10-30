@@ -1,10 +1,23 @@
 package check
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
+)
+
+const (
+	MaxConcurrency         = 256
+	MaxResponseBytes int64 = 1 << 20
+	MaxCheckTimeout        = time.Minute
+	MaxRequests            = 16
 )
 
 // Spec is a declarative description of what "this proxy works" means for one
@@ -18,16 +31,16 @@ type Spec struct {
 	Requests    []Request     `yaml:"requests" json:"requests"`
 
 	// ExitIPProbe, if set, is fetched first; its plain-text body is recorded as
-	// the exit IP and (when LocalIP is known) drives anonymity classification.
+	// the exit IP and (when LocalIP is known) permits an IP comparison.
 	// This is a generic property of a proxy, not a target — so it lives in core.
 	ExitIPProbe string `yaml:"exit_ip_probe" json:"exit_ip_probe,omitempty"`
 }
 
 // Request is a single HTTP call plus what must be true of its response.
 type Request struct {
-	Method string   `yaml:"method" json:"method"`
-	URL    string   `yaml:"url" json:"url"`
-	Expect Expect   `yaml:"expect" json:"expect"`
+	Method string `yaml:"method" json:"method"`
+	URL    string `yaml:"url" json:"url"`
+	Expect Expect `yaml:"expect" json:"expect"`
 }
 
 // Expect is the set of assertions applied to one response. Zero-valued fields
@@ -67,9 +80,18 @@ type specYAML struct {
 
 // ParseSpec decodes a Spec from YAML and validates it.
 func ParseSpec(data []byte) (Spec, error) {
+	if len(data) > 1<<20 {
+		return Spec{}, fmt.Errorf("preset exceeds 1 MiB")
+	}
 	var raw specYAML
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	decoder := yaml.NewDecoder(strings.NewReader(string(data)))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&raw); err != nil {
 		return Spec{}, fmt.Errorf("parse spec yaml: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return Spec{}, fmt.Errorf("preset must contain one YAML document")
 	}
 
 	spec := Spec{
@@ -93,17 +115,92 @@ func ParseSpec(data []byte) (Spec, error) {
 
 // Validate enforces the invariants the engine relies on.
 func (s Spec) Validate() error {
-	if s.Name == "" {
+	if s.Name == "" || len(s.Name) > 128 {
 		return fmt.Errorf("spec has no name")
 	}
 	if len(s.Requests) == 0 && s.ExitIPProbe == "" {
 		return fmt.Errorf("spec %q has no requests and no exit_ip_probe", s.Name)
 	}
-	for i, r := range s.Requests {
-		if r.URL == "" {
-			return fmt.Errorf("spec %q request %d has no url", s.Name, i)
+	if len(s.Requests) > MaxRequests || s.Timeout < 0 || s.Timeout > MaxCheckTimeout {
+		return fmt.Errorf("spec exceeds request count or timeout limits")
+	}
+	if s.ExitIPProbe != "" {
+		if err := validateURL(s.ExitIPProbe); err != nil {
+			return fmt.Errorf("exit_ip_probe: %w", err)
 		}
 	}
+	for i, r := range s.Requests {
+		if err := validateURL(r.URL); err != nil {
+			return fmt.Errorf("request %d: %w", i, err)
+		}
+		if _, err := http.NewRequest(r.method(), r.URL, nil); err != nil {
+			return fmt.Errorf("request %d has invalid method", i)
+		}
+		if r.Expect.MinDownload < 0 || r.Expect.MinDownload > MaxResponseBytes {
+			return fmt.Errorf("request %d min_download must be between 0 and %d", i, MaxResponseBytes)
+		}
+		for _, code := range r.Expect.Status {
+			if code < 100 || code > 599 {
+				return fmt.Errorf("request %d has invalid status", i)
+			}
+		}
+	}
+	return nil
+}
+
+func validateURL(raw string) error {
+	if len(raw) > 4096 {
+		return fmt.Errorf("url exceeds 4096 bytes")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Fragment != "" {
+		return fmt.Errorf("url must be an absolute HTTP(S) URL without credentials or fragment")
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("invalid target port")
+		}
+	} else if strings.HasSuffix(u.Host, ":") {
+		return fmt.Errorf("empty target port")
+	}
+	return nil
+}
+
+// UnmarshalJSON accepts readable duration strings, and legacy numeric nanoseconds.
+func (s *Spec) UnmarshalJSON(data []byte) error {
+	type alias Spec
+	var raw struct {
+		*alias
+		Timeout json.RawMessage `json:"timeout"`
+	}
+	var value Spec
+	raw.alias = (*alias)(&value)
+	dec := json.NewDecoder(strings.NewReader(string(data)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&raw); err != nil {
+		return err
+	}
+	if len(raw.Timeout) > 0 && string(raw.Timeout) != "null" {
+		var text string
+		if raw.Timeout[0] == '"' {
+			if err := json.Unmarshal(raw.Timeout, &text); err != nil {
+				return err
+			}
+			d, err := time.ParseDuration(text)
+			if err != nil {
+				return fmt.Errorf("invalid spec timeout: %w", err)
+			}
+			value.Timeout = d
+		} else {
+			var n int64
+			if err := json.Unmarshal(raw.Timeout, &n); err != nil {
+				return fmt.Errorf("invalid spec timeout: %w", err)
+			}
+			value.Timeout = time.Duration(n)
+		}
+	}
+	*s = value
 	return nil
 }
 

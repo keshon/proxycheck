@@ -32,6 +32,9 @@ func (d *socks4Dialer) DialContext(ctx context.Context, network, addr string) (n
 	if err != nil {
 		return nil, fmt.Errorf("socks4: bad target %q: %w", addr, err)
 	}
+	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+		return nil, fmt.Errorf("socks4 does not support IPv6 targets")
+	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 1 || port > 65535 {
 		return nil, fmt.Errorf("socks4: bad port %q", portStr)
@@ -41,6 +44,7 @@ func (d *socks4Dialer) DialContext(ctx context.Context, network, addr string) (n
 	if err != nil {
 		return nil, err
 	}
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
 
 	// Propagate context deadline to the socket so a hung handshake still times out.
 	if dl, ok := ctx.Deadline(); ok {
@@ -48,8 +52,16 @@ func (d *socks4Dialer) DialContext(ctx context.Context, network, addr string) (n
 	}
 
 	if err := d.handshake(conn, host, port); err != nil {
+		stop()
 		conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, err
+	}
+	if !stop() {
+		conn.Close()
+		return nil, ctx.Err()
 	}
 	// Clear the handshake deadline; the caller (http.Transport) manages its own.
 	_ = conn.SetDeadline(zeroTime)
@@ -73,8 +85,10 @@ func (d *socks4Dialer) handshake(conn net.Conn, host string, port int) error {
 		req = append(req, 0x00)
 	}
 
-	if _, err := conn.Write(req); err != nil {
+	if n, err := conn.Write(req); err != nil {
 		return fmt.Errorf("socks4: write request: %w", err)
+	} else if n != len(req) {
+		return io.ErrShortWrite
 	}
 
 	var reply [8]byte

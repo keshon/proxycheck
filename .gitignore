@@ -11,3 +11,7 @@ proxies.txt
 *.json
 datastore.json*
 *.txt
+
+/docs/audit/
+
+/docs/remediation.md

@@ -3,9 +3,11 @@ package check
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -17,10 +19,12 @@ const defaultBodyCap = 256 << 10 // 256 KiB
 
 // Options tunes a Run. Zero value is usable; see sane defaults in Normalize.
 type Options struct {
-	Concurrency  int           // parallel workers (default 100)
-	DialTimeout  time.Duration // TCP/handshake to the proxy (default 8s)
-	TLSTimeout   time.Duration // TLS handshake (default 6s)
-	LocalIP      string        // origin's public IP, enables anonymity classification
+	Concurrency        int           // parallel workers (default 100)
+	DialTimeout        time.Duration // TCP/handshake to the proxy (default 8s)
+	TLSTimeout         time.Duration // TLS handshake (default 6s)
+	LocalIP            string        // validated origin observation for IP comparison
+	IncludeCredentials bool          // explicit opt-in for credential-preserving CLI exports
+	PublicProxiesOnly  bool          // API default: block special-use addresses at dial time
 }
 
 // Normalize fills zero fields with defaults and returns the result.
@@ -34,6 +38,15 @@ func (o Options) Normalize() Options {
 	if o.TLSTimeout <= 0 {
 		o.TLSTimeout = 6 * time.Second
 	}
+	if o.Concurrency > MaxConcurrency {
+		o.Concurrency = MaxConcurrency
+	}
+	if o.DialTimeout > 30*time.Second {
+		o.DialTimeout = 30 * time.Second
+	}
+	if o.TLSTimeout > 30*time.Second {
+		o.TLSTimeout = 30 * time.Second
+	}
 	return o
 }
 
@@ -43,6 +56,9 @@ func (o Options) Normalize() Options {
 func Check(ctx context.Context, p Proxy, spec Spec, opts Options) Result {
 	opts = opts.Normalize()
 	start := time.Now()
+	if err := spec.Validate(); err != nil {
+		return fail(p, spec.Name, ErrInput, err, 0, start)
+	}
 
 	timeout := spec.Timeout
 	if timeout <= 0 {
@@ -51,7 +67,7 @@ func Check(ctx context.Context, p Proxy, spec Spec, opts Options) Result {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	tr, err := transportFor(p, opts.DialTimeout, opts.TLSTimeout)
+	tr, err := transportFor(p, opts.DialTimeout, opts.TLSTimeout, opts.PublicProxiesOnly)
 	if err != nil {
 		return fail(p, spec.Name, ErrInput, err, 0, start)
 	}
@@ -70,6 +86,9 @@ func Check(ctx context.Context, p Proxy, spec Spec, opts Options) Result {
 		Check:     spec.Name,
 		CheckedAt: start,
 	}
+	if opts.IncludeCredentials {
+		res.Proxy = p.String()
+	}
 
 	// Optional exit-IP probe first, so ExitIP is populated even if later steps fail.
 	if spec.ExitIPProbe != "" {
@@ -83,7 +102,7 @@ func Check(ctx context.Context, p Proxy, spec Spec, opts Options) Result {
 			return res
 		}
 		res.ExitIP = ip
-		res.Anonymity = classifyAnonymity(ip, opts.LocalIP)
+		res.IPComparison = compareIPs(ip, opts.LocalIP)
 	}
 
 	// Each request must pass. First step also captures connect/TTFB timings.
@@ -110,13 +129,19 @@ func Check(ctx context.Context, p Proxy, spec Spec, opts Options) Result {
 // runStep executes a single request and evaluates its expectations. It returns
 // the step result plus connect/TTFB timings observed via httptrace.
 func runStep(ctx context.Context, client *http.Client, r Request) (StepResult, int64, int64) {
+	step, connect, firstByte, _ := fetchStep(ctx, client, r)
+	return step, connect, firstByte
+}
+
+func fetchStep(ctx context.Context, client *http.Client, r Request) (StepResult, int64, int64, []byte) {
 	step := StepResult{URL: r.URL}
 	begin := time.Now()
 
 	var connectAt, firstByteAt time.Time
+	var traceMu sync.Mutex
 	trace := &httptrace.ClientTrace{
-		GotConn:              func(httptrace.GotConnInfo) { connectAt = time.Now() },
-		GotFirstResponseByte: func() { firstByteAt = time.Now() },
+		GotConn:              func(httptrace.GotConnInfo) { traceMu.Lock(); connectAt = time.Now(); traceMu.Unlock() },
+		GotFirstResponseByte: func() { traceMu.Lock(); firstByteAt = time.Now(); traceMu.Unlock() },
 	}
 	tctx := httptrace.WithClientTrace(ctx, trace)
 
@@ -125,7 +150,7 @@ func runStep(ctx context.Context, client *http.Client, r Request) (StepResult, i
 		step.ErrorClass = ErrInput
 		step.Error = err.Error()
 		step.DurationMS = msSince(begin)
-		return step, 0, 0
+		return step, 0, 0, nil
 	}
 	setBrowserHeaders(httpReq)
 
@@ -134,7 +159,7 @@ func runStep(ctx context.Context, client *http.Client, r Request) (StepResult, i
 		step.ErrorClass = classifyDialError(unwrapURLError(err))
 		step.Error = err.Error()
 		step.DurationMS = msSince(begin)
-		return step, 0, 0
+		return step, 0, 0, nil
 	}
 	defer resp.Body.Close()
 
@@ -144,28 +169,43 @@ func runStep(ctx context.Context, client *http.Client, r Request) (StepResult, i
 	if r.Expect.MinDownload > limit {
 		limit = r.Expect.MinDownload
 	}
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, limit))
+	// Read one extra byte to distinguish an over-limit body from a complete one.
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	traceMu.Lock()
+	connectMS, ttfbMS := timing(begin, connectAt), timing(begin, firstByteAt)
+	traceMu.Unlock()
 	step.Bytes = int64(len(body))
 	step.DurationMS = msSince(begin)
 
 	// A read error after a status is a live-but-flaky path, not a dead proxy.
-	if readErr != nil && r.Expect.MinDownload > 0 {
+	if readErr != nil {
 		step.ErrorClass = classifyDialError(readErr)
 		if step.ErrorClass == ErrProtocol {
 			step.ErrorClass = ErrAssert
 		}
 		step.Error = "download interrupted: " + readErr.Error()
-		return step, timing(begin, connectAt), timing(begin, firstByteAt)
+		return step, connectMS, ttfbMS, nil
+	}
+	// Minimum-download-only checks intentionally sample a bounded prefix. Body
+	// assertions require the complete bounded response so absent markers are sound.
+	if int64(len(body)) > limit {
+		if len(r.Expect.BodyContains) > 0 || len(r.Expect.BodyAbsent) > 0 || r.Expect.MinDownload == 0 {
+			step.ErrorClass = ErrAssert
+			step.Error = "response exceeds body scan limit"
+			return step, connectMS, ttfbMS, nil
+		}
+		body = body[:limit]
+		step.Bytes = limit
 	}
 
 	if class, msg := evaluate(r.Expect, resp, body); class != ErrNone {
 		step.ErrorClass = class
 		step.Error = msg
-		return step, timing(begin, connectAt), timing(begin, firstByteAt)
+		return step, connectMS, ttfbMS, nil
 	}
 
 	step.OK = true
-	return step, timing(begin, connectAt), timing(begin, firstByteAt)
+	return step, connectMS, ttfbMS, body
 }
 
 // evaluate applies the expectations to a response, returning ErrNone on success
@@ -203,52 +243,60 @@ func evaluate(e Expect, resp *http.Response, body []byte) (ErrorClass, string) {
 
 // probeExitIP fetches a plain-text IP echo endpoint and returns the trimmed IP.
 func probeExitIP(ctx context.Context, client *http.Client, url string) (string, StepResult) {
-	step, _, _ := runStep(ctx, client, Request{URL: url})
+	step, _, _, body := fetchStep(ctx, client, Request{URL: url})
 	if !step.OK {
 		return "", step
 	}
-	// Re-fetch the body: runStep discards it. Cheap and keeps runStep generic.
-	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-	setBrowserHeaders(req)
-	resp, err := client.Do(req)
-	if err != nil {
+	ip, err := netip.ParseAddr(strings.TrimSpace(string(body)))
+	if err != nil || ip.Zone() != "" {
 		step.OK = false
-		step.ErrorClass = classifyDialError(unwrapURLError(err))
-		step.Error = err.Error()
+		step.ErrorClass = ErrAssert
+		step.Error = "exit_ip_probe did not return an IP address"
 		return "", step
 	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 128))
-	return strings.TrimSpace(string(b)), step
+	return ip.Unmap().String(), step
 }
 
-// classifyAnonymity compares the exit IP against the origin's known public IP.
-// Elite (no proxy-revealing headers) requires header inspection and is out of
-// scope for v1, so we honestly report only unknown/transparent/anonymous.
-func classifyAnonymity(exitIP, localIP string) Anonymity {
-	if localIP == "" || exitIP == "" {
-		return AnonUnknown
+// compareIPs compares normalized observations without inferring header privacy.
+func compareIPs(exitIP, localIP string) IPComparison {
+	a, errA := netip.ParseAddr(exitIP)
+	b, errB := netip.ParseAddr(localIP)
+	if errA != nil || errB != nil || a.Zone() != "" || b.Zone() != "" {
+		return IPUnknown
 	}
-	if exitIP == localIP {
-		return AnonTransparent
+	if a.Unmap() == b.Unmap() {
+		return IPSame
 	}
-	return AnonAnonymous
+	return IPDifferent
 }
 
 // Run checks many proxies concurrently against one spec. Results are delivered
 // to emit as they complete (unordered). emit is called from worker goroutines
 // and must be safe for concurrent use, or guarded by the caller.
-func Run(ctx context.Context, proxies []Proxy, spec Spec, opts Options, emit func(Result)) {
+func Run(ctx context.Context, proxies []Proxy, spec Spec, opts Options, emit func(Result) error) error {
 	opts = opts.Normalize()
+	if err := spec.Validate(); err != nil {
+		return fmt.Errorf("invalid spec: %w", err)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var firstErr error
+	var once sync.Once
 
 	jobs := make(chan Proxy)
 	var wg sync.WaitGroup
-	for i := 0; i < opts.Concurrency; i++ {
+	for i := 0; i < min(opts.Concurrency, len(proxies)); i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for p := range jobs {
-				emit(Check(ctx, p, spec, opts))
+				if ctx.Err() != nil {
+					return
+				}
+				if err := emit(Check(ctx, p, spec, opts)); err != nil {
+					once.Do(func() { firstErr = err; cancel() })
+					return
+				}
 			}
 		}()
 	}
@@ -258,12 +306,19 @@ func Run(ctx context.Context, proxies []Proxy, spec Spec, opts Options, emit fun
 		case <-ctx.Done():
 			close(jobs)
 			wg.Wait()
-			return
+			if firstErr != nil {
+				return firstErr
+			}
+			return ctx.Err()
 		case jobs <- p:
 		}
 	}
 	close(jobs)
 	wg.Wait()
+	if firstErr != nil {
+		return firstErr
+	}
+	return ctx.Err()
 }
 
 // --- small helpers ---
