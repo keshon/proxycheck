@@ -2,14 +2,14 @@
 (() => {
   const presets = {
     basic: { description: "Fetches api.ipify.org over HTTPS and requires an HTTP 200 response." },
-    anonymity: { description: "Compares the exit IP with your direct origin IP and reports same, different or unknown. Forwarded-origin headers are outside this check." },
-    youtube: { description: "Checks YouTube metadata and image delivery. It does not verify video playback." },
-    telegram: { description: "Checks the Telegram Bot API with expected status and response markers. It does not test MTProto or every Telegram client feature." }
+    anonymity: { description: "Reports the exit IP and whether it matches your direct IP. This comparison does not establish anonymity." },
+    youtube: { description: "Requests oEmbed metadata and downloads at least 8 KiB from YouTube’s image CDN. This does not test video playback." },
+    telegram: { description: "Requests the Bot API with an invalid token and checks for the expected error response. This does not test MTProto." }
   };
   const outcomes = {
-    passed: { ok: true, time: 284, verdict: "✓ Assertions passed", explanation: "The metadata request and image download met the configured checks." },
-    timeout: { ok: false, time: 15000, verdict: "× Check timed out", error: "context deadline exceeded", explanation: "The check did not finish before its timeout." },
-    target_block: { ok: false, time: 192, verdict: "× Response rejected", error: "Forbidden (403)", explanation: "The target returned HTTP 403, so the request did not pass this check." }
+    passed: { ok: true, time: 284, verdict: "✓ Check passed", explanation: "Both YouTube requests passed." },
+    timeout: { ok: false, time: 15000, verdict: "× Check timed out", error: "context deadline exceeded", explanation: "The check exceeded the preset’s 15-second timeout." },
+    target_block: { ok: false, time: 192, verdict: "× Response rejected", error: "Forbidden (403)", explanation: "The server returned HTTP 403 instead of the expected HTTP 200." }
   };
   const announce = message => { document.getElementById("interaction-status").textContent = message; };
   document.querySelectorAll("[data-outcome]").forEach(button => {
@@ -72,7 +72,6 @@
           field.className = "manual-copy-field";
           field.setAttribute("aria-label", "Select these commands and copy manually");
           field.readOnly = true;
-          field.style.cssText = "display:block;width:100%;min-height:90px;margin-top:12px;font:12px monospace;padding:10px;border:1px solid #214ce5;background:#f5f5f0;color:#20241f";
           button.parentElement.appendChild(field);
         }
         field.value = text;
